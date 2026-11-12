@@ -1,4 +1,9 @@
+# Local environment files may contain API keys.
 .env
+.env.*
+!.env.example
+# Local backups may contain previous credentials and uncommitted work.
+.local-backups/
 .venv/
 __pycache__/
 *.pyc

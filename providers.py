@@ -1,15 +1,40 @@
-"""Bốn provider cùng một interface. Không chứa agent loop."""
+"""Các provider cùng một interface. Không chứa agent loop."""
 import json
 import os
+from pathlib import Path
 import urllib.error
 import urllib.request
+from urllib.parse import urlsplit
+from uuid import uuid4
 
 CONFIG = {
     'openai': ('OPENAI_API_KEY', 'https://api.openai.com/v1/chat/completions'),
     'gemini': ('GEMINI_API_KEY', 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions'),
     'openrouter': ('OPENROUTER_API_KEY', 'https://openrouter.ai/api/v1/chat/completions'),
     'anthropic': ('ANTHROPIC_API_KEY', 'https://api.anthropic.com/v1/messages'),
+    'opencode': ('API_KEY', 'https://opencode.ai/inference/go/openai/v1/chat/completions'),
 }
+
+
+def load_env(path=None):
+    """Nạp .env đơn giản; biến trong terminal được ưu tiên, không in key."""
+    path = Path(path) if path is not None else Path(__file__).resolve().parent / '.env'
+    if not path.is_file():
+        return
+    allowed = {'PROVIDER', 'MODEL', 'JUDGE_PROVIDER', 'JUDGE_MODEL',
+               'OPENAI_API_KEY', 'GEMINI_API_KEY', 'ANTHROPIC_API_KEY',
+               'OPENROUTER_API_KEY', 'API_KEY', 'API_ENDPOINT', 'API_MODEL'}
+    for raw in path.read_text(encoding='utf-8-sig').splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        line = line.removeprefix('export ')
+        name, separator, value = line.partition('=')
+        name, value = name.strip(), value.strip()
+        if separator and name in allowed:
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                value = value[1:-1]
+            os.environ.setdefault(name, value)
 
 
 def post_json(url, headers, payload):
@@ -37,6 +62,14 @@ class Provider:
             raise ValueError('Cần đặt MODEL là model có hỗ trợ tool calling.')
         self.name, self.model = name, model
         key_name, self.url = CONFIG[name]
+        self.session_id = str(uuid4())
+        if name == 'opencode':
+            endpoint = os.getenv('API_ENDPOINT', 'https://opencode.ai/inference/go/openai/v1').rstrip('/')
+            parsed = urlsplit(endpoint)
+            if (parsed.scheme != 'https' or parsed.netloc != 'opencode.ai'
+                    or parsed.query or parsed.fragment):
+                raise ValueError('API_ENDPOINT phải là URL HTTPS của opencode.ai, không có query hoặc fragment.')
+            self.url = endpoint if endpoint.endswith('/chat/completions') else endpoint + '/chat/completions'
         self.key = os.getenv(key_name)
         if not self.key:
             raise ValueError(f'Thiếu {key_name}; xem README.md.')
@@ -47,7 +80,11 @@ class Provider:
         payload = {'model': self.model, 'messages': messages}
         if schemas:
             payload['tools'] = schemas
-        data = post_json(self.url, {'Authorization': f'Bearer {self.key}'}, payload)
+        headers = {'Authorization': f'Bearer {self.key}'}
+        if self.name == 'opencode':
+            headers.update({'User-Agent': 'status-investigation-lab/1.0',
+                            'x-opencode-session': self.session_id})
+        data = post_json(self.url, headers, payload)
         choice = data['choices'][0]
         message = choice['message']
         calls = [{'id': c['id'], 'name': c['function']['name'], 'arguments': c['function']['arguments']} for c in message.get('tool_calls', [])]
